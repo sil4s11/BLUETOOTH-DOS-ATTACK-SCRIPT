@@ -1,55 +1,116 @@
-# Bluetooth DOS-Attack Script
+# Bluetooth L2CAP Diagnostic Helper
 
-![Python Version](https://img.shields.io/pypi/pyversions/Django.svg)
+Small Linux CLI for authorized Bluetooth L2CAP echo diagnostics. It can scan nearby devices, build bounded `l2ping` checks, and print dry-run commands before anything is sent.
 
-Script for conducting DOS-attacks on Bluetooth devices for pentest purposes.
+This project is intended for devices you own or have written permission to test.
 
-## Disclaimer
+## What changed
 
-This project was created for educational purposes and personal use only.
+- Dry-run is the default behavior.
+- Live execution requires both `--execute` and `--confirm-authorized`.
+- `l2ping` runs are bounded with `--count`; flood mode is not used.
+- Bluetooth MAC addresses, adapter names, sizes, counts, timeouts, delays, and worker counts are validated.
+- Shell command strings were replaced with argument lists passed to `subprocess.run`.
+- `--scan`, `--json`, `--timeout`, `--delay`, and `--version` were added.
+- Unit tests cover parsing, validation, command building, and dry-run output.
 
-**DISCLAIMER:** This software is provided "as is" without any warranty. Usage is at your own risk. The developers assume no liability for any misuse or damage caused by this program.
+## Requirements
 
-## Installation
+- Linux with BlueZ tools installed.
+- `hcitool` for scanning.
+- `l2ping` for L2CAP echo checks.
+- Python 3.9 or newer.
+
+On Debian/Kali-style systems:
 
 ```shell
-$ sudo apt update
-$ sudo apt install python3
-$ sudo git clone https://github.com/jieggiI/BLUETOOTH-DOS-ATTACK-SCRIPT.git
-$ cd BLUETOOTH-DOS-ATTACK-SCRIPT/
-$ python3 Bluetooth-DOS-Attack.py
+sudo apt update
+sudo apt install python3 bluez
 ```
 
-## Note
+## Usage
 
-This script is designed to work only on Linux systems.You must have "l2ping" and "hcitool" utilities on your Linux machine (they are installed by default on Kali Linux).
+Show CLI options:
 
-## Tested on
+```shell
+python3 Bluetooth-DOS-Attack.py --help
+```
 
-Kali Linux as attacker, and Xiaomi Portable Bluetooth Speaker as target, 
+Scan nearby devices:
 
-Raspberry Pi W Zero as attacker, and Redmi Buds Lite as target
+```shell
+python3 Bluetooth-DOS-Attack.py --scan
+```
+
+Scan with JSON output:
+
+```shell
+python3 Bluetooth-DOS-Attack.py --scan --json
+```
+
+Build a dry-run diagnostic command:
+
+```shell
+python3 Bluetooth-DOS-Attack.py --target AA:BB:CC:DD:EE:FF --package-size 64 --count 4
+```
+
+Run a bounded diagnostic check only when authorized:
+
+```shell
+python3 Bluetooth-DOS-Attack.py --target AA:BB:CC:DD:EE:FF --package-size 64 --count 4 --timeout 5 --delay 1 --execute --confirm-authorized
+```
+
+Interactive mode is still available:
+
+```shell
+python3 Bluetooth-DOS-Attack.py
+```
 
 ## Manual
 
 Target ID or MAC: ID or MAC address displayed after scanning.
 
-Package Size: Size of the packages to be sent to the target (600 is optimal).
+Package Size: Size of the L2CAP echo payload sent to the target during a bounded diagnostic check.
 
-Threads Count: Number of threads that simultaneously send packages to the target. Optimal value can be found in the provided table.
+Threads Count: Number of worker threads that run the diagnostic command. The default is 1, and higher values should only be used in a controlled lab with explicit authorization.
 
-|  Packages size | Threads count| Ping, ms  | Distance, meters | Time waited, sec  | Device |
-|:--------------:|:-----: |:------------:|:--------------------:|:----------------:|:------:|
-|  600           | 1       | 9           |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 10      | 38          |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 20      | 78          |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 50      | 229         |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 100     | 413         |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 200     | 806         |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 500     | 1961        |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 1000    | 6621        |0,3                   |           5      |Xiaomi Mi Portable Bluetooth Speaker|
-|  600           | 1000+   | Couldn't calculate  |0,3           |           5      |Xiaomi Mi Portable Bluetooth Speaker|
+Packet Count: Number of packets each worker sends before exiting.
 
-## What Happens to the Target Device
+Timeout: Number of seconds to wait for a response.
 
-While I can't speak for all devices, the device I tested typically just turned off.
+Delay: Number of seconds to wait between packets.
+
+## Diagnostic baseline table
+
+Use this table for low-impact reachability and latency checks on devices you own or are authorized to test. It is not a tuning guide for disrupting devices.
+
+| Scenario | Package size | Threads count | Packet count | Timeout, sec | Delay, sec | Purpose |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Basic reachability | 44 | 1 | 4 | 5 | 1 | Confirm the device responds to L2CAP echo. |
+| Slightly larger payload | 64 | 1 | 4 | 5 | 1 | Check response behavior with a modest payload. |
+| Short stability check | 64 | 1 | 10 | 5 | 1 | Confirm responses stay consistent across a small sample. |
+| Slow link check | 44 | 1 | 4 | 10 | 2 | Give distant or low-power devices extra response time. |
+
+## Safety limits
+
+The script enforces conservative limits:
+
+| Setting | Limit |
+| --- | --- |
+| Package size | 1-600 bytes |
+| Workers | 1-16 |
+| Packets per worker | 1-20 |
+| Timeout | 1-30 seconds |
+| Delay | 0-10 seconds |
+
+## Testing
+
+Run the unit tests:
+
+```shell
+python3 -m unittest discover
+```
+
+## Disclaimer
+
+This software is provided as-is, without warranty. You are responsible for complying with local laws, device ownership, network policies, and test authorization.

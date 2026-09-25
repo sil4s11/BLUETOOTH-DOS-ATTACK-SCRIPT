@@ -31,6 +31,7 @@ MAX_THREADS = 16
 MAX_PACKET_COUNT = 20
 MAX_TIMEOUT = 30
 MAX_DELAY = 10
+MAX_TOTAL_PACKETS = 64
 
 VERSION = "2.0.0"
 
@@ -70,6 +71,22 @@ def validate_int_range(name: str, value: int, minimum: int, maximum: int) -> int
     if value < minimum or value > maximum:
         raise ValidationError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def validate_total_packets(threads_count: int, packet_count: int) -> int:
+    """Bound packets across all workers, not just per worker.
+
+    MAX_THREADS * MAX_PACKET_COUNT is 320 packets, well above the small samples
+    the diagnostic baseline describes, so the product is capped as well.
+    """
+    total = threads_count * packet_count
+    if total > MAX_TOTAL_PACKETS:
+        raise ValidationError(
+            f"{threads_count} workers x {packet_count} packets = {total} packets, "
+            f"which exceeds the total budget of {MAX_TOTAL_PACKETS}. "
+            f"Lower --threads or --count."
+        )
+    return total
 
 
 def require_tool(name: str) -> None:
@@ -376,13 +393,28 @@ def print_result(summary: dict[str, object], json_output: bool = False) -> None:
 
 
 
-def print_dry_run(command: list[str], threads_count: int, json_output: bool = False) -> None:
+def print_dry_run(
+    command: list[str],
+    threads_count: int,
+    total_packets: int,
+    json_output: bool = False,
+) -> None:
     if json_output:
-        print(json.dumps({"dry_run": True, "threads": threads_count, "command": command}))
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "threads": threads_count,
+                    "total_packets": total_packets,
+                    "command": command,
+                }
+            )
+        )
         return
 
     print("[dry-run] No packets were sent.")
     print(f"[dry-run] Workers: {threads_count}")
+    print(f"[dry-run] Total packets if executed: {total_packets} (budget {MAX_TOTAL_PACKETS})")
     print("[dry-run] Command:", " ".join(command))
 
 
@@ -462,8 +494,10 @@ def run_from_args(args: argparse.Namespace) -> int:
         delay=args.delay,
     )
 
+    total_packets = validate_total_packets(threads_count, args.count)
+
     if not args.execute:
-        print_dry_run(command, threads_count, json_output=args.json)
+        print_dry_run(command, threads_count, total_packets, json_output=args.json)
         return 0
 
     if not args.confirm_authorized:
@@ -506,9 +540,11 @@ def run_interactive(interface: str = DEFAULT_INTERFACE) -> int:
         delay=delay,
     )
 
+    total_packets = validate_total_packets(threads_count, packet_count)
+
     phrase = input("Type 'authorized' to execute, or press Enter for dry-run > ").strip()
     if phrase != "authorized":
-        print_dry_run(command, threads_count)
+        print_dry_run(command, threads_count, total_packets)
         return 0
 
     summary = run_l2ping_workers(command, threads_count)

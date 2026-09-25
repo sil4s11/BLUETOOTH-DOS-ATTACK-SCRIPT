@@ -146,12 +146,43 @@ class BluetoothL2capHelperTests(unittest.TestCase):
     def test_dry_run_json_output(self):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            bt.print_dry_run(["l2ping", "-c", "1", "AA:BB:CC:DD:EE:FF"], 1, json_output=True)
+            bt.print_dry_run(
+                ["l2ping", "-c", "1", "AA:BB:CC:DD:EE:FF"],
+                1,
+                1,
+                json_output=True,
+            )
 
         payload = json.loads(stdout.getvalue())
         self.assertTrue(payload["dry_run"])
         self.assertEqual(payload["threads"], 1)
+        self.assertEqual(payload["total_packets"], 1)
         self.assertEqual(payload["command"][0], "l2ping")
+
+    def test_total_packet_budget_rejects_multiplied_sends(self):
+        # Per-worker limits alone allow 16 * 20 = 320 packets.
+        self.assertEqual(bt.validate_total_packets(1, 20), 20)
+        self.assertEqual(bt.validate_total_packets(4, 16), 64)
+        with self.assertRaises(bt.ValidationError):
+            bt.validate_total_packets(bt.MAX_THREADS, bt.MAX_PACKET_COUNT)
+        with self.assertRaises(bt.ValidationError):
+            bt.validate_total_packets(16, 5)
+
+    def test_total_packet_budget_error_names_the_product(self):
+        with self.assertRaises(bt.ValidationError) as caught:
+            bt.validate_total_packets(bt.MAX_THREADS, bt.MAX_PACKET_COUNT)
+
+        message = str(caught.exception)
+        self.assertIn("320", message)
+        self.assertIn(str(bt.MAX_TOTAL_PACKETS), message)
+
+    def test_dry_run_reports_total_packet_budget(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            bt.print_dry_run(["l2ping", "-c", "4", "AA:BB:CC:DD:EE:FF"], 2, 8)
+
+        self.assertIn("8", stdout.getvalue())
+        self.assertIn(str(bt.MAX_TOTAL_PACKETS), stdout.getvalue())
 
     def test_parse_l2ping_output_reads_replies_and_summary(self):
         output = (
@@ -248,6 +279,37 @@ class BluetoothL2capHelperTests(unittest.TestCase):
 
         self.assertTrue(merged["unsupported_echo"])
         self.assertIn("does not support", bt.format_summary(merged))
+
+    def test_dry_run_does_not_fall_through_to_authorization_check(self):
+        # A dry-run must be terminal: it prints and returns 0 without ever
+        # demanding --confirm-authorized or touching the radio.
+        args = bt.create_parser().parse_args(
+            ["--target", "AA:BB:CC:DD:EE:FF", "--threads", "2", "--count", "4"]
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(bt.run_from_args(args), 0)
+
+        self.assertIn("[dry-run]", stdout.getvalue())
+        self.assertNotIn("--confirm-authorized", stdout.getvalue())
+
+    def test_execute_without_authorization_is_rejected(self):
+        args = bt.create_parser().parse_args(
+            ["--target", "AA:BB:CC:DD:EE:FF", "--count", "2", "--execute"]
+        )
+        with self.assertRaises(bt.ValidationError):
+            bt.run_from_args(args)
+
+    def test_over_budget_request_is_rejected_before_dry_run(self):
+        args = bt.create_parser().parse_args(
+            ["--target", "AA:BB:CC:DD:EE:FF", "--threads", "16", "--count", "20"]
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(bt.ValidationError):
+                bt.run_from_args(args)
+
+        self.assertEqual(stdout.getvalue(), "")
 
 
 if __name__ == "__main__":

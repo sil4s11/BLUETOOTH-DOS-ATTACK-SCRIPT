@@ -16,8 +16,10 @@ This project is intended for devices you own or have written permission to test.
 - `l2ping` output is parsed and summarised: replies, packet loss, and RTT
   min/avg/max, with `--json` for machine-readable results.
 - Shell command strings were replaced with argument lists passed to `subprocess.run`.
+- Total packets per run are capped across all workers, not only per worker.
 - `--scan`, `--json`, `--timeout`, `--delay`, and `--version` were added.
-- Unit tests cover parsing, validation, command building, and dry-run output.
+- Unit tests cover parsing, validation, command building, packet budget, and
+  dry-run output.
 
 ## Requirements
 
@@ -125,6 +127,11 @@ The script enforces conservative limits:
 | Packets per worker | 1-20 |
 | Timeout | 1-30 seconds |
 | Delay | 0-10 seconds |
+| Total packets (workers x count) | 1-64 |
+
+The per-worker limits would otherwise allow 16 x 20 = 320 packets in a
+single run, well above the samples in the table above. `--dry-run` output and
+`--json` both report the total so it is visible before anything is sent.
 
 ## Testing
 

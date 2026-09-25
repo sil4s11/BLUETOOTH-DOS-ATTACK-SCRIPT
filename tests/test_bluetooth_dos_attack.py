@@ -23,19 +23,72 @@ class BluetoothL2capHelperTests(unittest.TestCase):
         with self.assertRaises(bt.ValidationError):
             bt.normalize_mac("AA:BB:CC:DD:EE:FF; reboot")
 
-    def test_parse_scan_output_keeps_valid_devices(self):
-        output = """
-Scanning ...
-        aa:bb:cc:dd:ee:ff    Speaker One
-        not-a-mac            ignored
-        11:22:33:44:55:66
-"""
+    def test_parse_scan_output_reads_bluetoothctl_devices(self):
+        output = (
+            "SetDiscoveryFilter success\n"
+            "AdvertisementMonitor path registered\n"
+            "Discovery started\n"
+            "[\x1b[0;93mCHG\x1b[0m] Controller 88:F4:DA:99:89:AE Discovering: yes\n"
+            "[\x1b[0;92mNEW\x1b[0m] Device 0c:ec:84:10:24:18 View3 Pro\n"
+            "[\x1b[0;92mNEW\x1b[0m] LE /org/bluez/hci0/dev_0C_EC_84_10_24_18\n"
+            "[\x1b[0;92mNEW\x1b[0m] Device 04:39:26:B6:02:97\n"
+        )
+
         self.assertEqual(
             bt.parse_scan_output(output),
             [
-                ("AA:BB:CC:DD:EE:FF", "Speaker One"),
-                ("11:22:33:44:55:66", "Unknown"),
+                ("0C:EC:84:10:24:18", "View3 Pro"),
+                ("04:39:26:B6:02:97", "Unknown"),
             ],
+        )
+
+    def test_parse_scan_output_ignores_transport_lines(self):
+        # A single dual-mode device emits one "Device" line plus one object
+        # line per transport. Only the Device line carries the name.
+        output = (
+            "[NEW] Device 50:e3:da:1f:0d:82 ALEJOHACKTOOL\n"
+            "[NEW] LE /org/bluez/hci0/dev_50_E3_DA_1F_0D_82\n"
+            "[NEW] BREDR /org/bluez/hci0/dev_50_E3_DA_1F_0D_82\n"
+        )
+
+        self.assertEqual(
+            bt.parse_scan_output(output),
+            [("50:E3:DA:1F:0D:82", "ALEJOHACKTOOL")],
+        )
+
+    def test_parse_scan_output_dedupes_repeated_advertisements(self):
+        output = (
+            "[NEW] Device 74:e9:d8:33:f7:a5 SSL_0EXcXKGF5CDZWOA==\n"
+            "[NEW] Device 74:E9:D8:33:F7:A5 SSL_0EXcXKGF5CDZWOA==\n"
+        )
+
+        self.assertEqual(
+            bt.parse_scan_output(output),
+            [("74:E9:D8:33:F7:A5", "SSL_0EXcXKGF5CDZWOA==")],
+        )
+
+    def test_parse_scan_output_ignores_non_device_lines(self):
+        output = (
+            "Discovery started\n"
+            "[CHG] Controller 88:F4:DA:99:89:AE Discovering: no\n"
+            "  aa:bb:cc:dd:ee:ff    Old hcitool row\n"
+            "not-a-mac ignored\n"
+        )
+
+        self.assertEqual(bt.parse_scan_output(output), [])
+
+    def test_parse_scan_output_ignores_chg_rssi_lines(self):
+        # [CHG] Device lines carry RSSI, never a name. Treating one as a name
+        # produced devices listed as "RSSI: 0xffffffb8 (-72)".
+        output = (
+            "[NEW] Device 74:E9:D8:33:F7:A5 SSL_0EXcXKGF5CDZWOA==\n"
+            "[CHG] Device 74:E9:D8:33:F7:A5 RSSI: 0xffffffb8 (-72)\n"
+            "[CHG] Device 04:39:26:B6:02:97 RSSI: 0xffffffae (-82)\n"
+        )
+
+        self.assertEqual(
+            bt.parse_scan_output(output),
+            [("74:E9:D8:33:F7:A5", "SSL_0EXcXKGF5CDZWOA==")],
         )
 
     def test_build_l2ping_command_is_bounded(self):

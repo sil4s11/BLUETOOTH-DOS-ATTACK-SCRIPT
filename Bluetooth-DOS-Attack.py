@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Iterable
 
 
@@ -76,36 +77,79 @@ def require_tool(name: str) -> None:
         raise RuntimeError(f"Required tool is not installed or not on PATH: {name}")
 
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+BLUETOOTHCTL_DEVICE_RE = re.compile(r"^\[NEW\]\s+Device\s+([0-9A-Fa-f:]{17})(?:\s+(.*))?$")
+
+BLUETOOTH_SYSFS = "/sys/class/bluetooth"
+DEFAULT_SCAN_SECONDS = 8
+DEFAULT_SCAN_TIMEOUT = 30
+
+
 def parse_scan_output(output: str) -> list[tuple[str, str]]:
-    devices: list[tuple[str, str]] = []
+    """Parse `bluetoothctl scan on` output into (mac, name) pairs.
+
+    hcitool was removed from BlueZ 5.87, so discovery goes over D-Bus instead.
+    Only "[NEW] Device" lines carry an address and name. Two other line shapes
+    are deliberately skipped: the LE/BREDR object lines, which repeat a device
+    once per transport, and "[CHG] Device" lines, which report RSSI
+    ("[CHG] Device 74:E9:.. RSSI: 0xffffffb8 (-72)") and would otherwise be
+    mistaken for its name.
+    """
+    devices: dict[str, str] = {}
     for raw_line in output.splitlines():
-        line = raw_line.strip()
-        if not line or line.lower().startswith("scanning"):
+        line = ANSI_ESCAPE_RE.sub("", raw_line).strip()
+        if not line:
             continue
 
-        parts = line.split(maxsplit=1)
-        if not parts:
+        match = BLUETOOTHCTL_DEVICE_RE.match(line)
+        if not match:
             continue
 
-        mac = parts[0]
-        if not is_valid_mac(mac):
-            continue
+        mac = normalize_mac(match.group(1))
+        name = (match.group(2) or "").strip()
+        if not name:
+            name = "Unknown"
+        devices.setdefault(mac, name)
 
-        name = parts[1] if len(parts) > 1 else "Unknown"
-        devices.append((normalize_mac(mac), name))
-
-    return devices
+    return list(devices.items())
 
 
-def scan_devices() -> list[tuple[str, str]]:
-    require_tool("hcitool")
+
+def scan_devices(interface: str = DEFAULT_INTERFACE) -> list[tuple[str, str]]:
+    """Discover nearby devices over D-Bus.
+
+    hcitool was removed from BlueZ 5.87, so scanning goes through bluetoothctl,
+    which talks to bluetoothd over D-Bus and needs no raw HCI socket.
+
+    `scan on` runs on bluetoothctl's default controller, so no `select` is
+    issued: bluetoothctl addresses controllers by BD_ADDR or alias rather than
+    by the hciN kernel name, and passing `select` together with `scan` in one
+    argv also keeps the client alive past --timeout.
+    """
+    require_tool("bluetoothctl")
+    safe_interface = validate_interface(interface)
+    require_adapter(safe_interface)
+
     result = subprocess.run(
-        ["hcitool", "scan"],
+        ["bluetoothctl", "--timeout", str(DEFAULT_SCAN_SECONDS), "scan", "on"],
         check=True,
         capture_output=True,
         text=True,
+        timeout=DEFAULT_SCAN_TIMEOUT,
     )
     return parse_scan_output(result.stdout)
+
+
+def require_adapter(interface: str) -> None:
+    root = Path(BLUETOOTH_SYSFS)
+    if (root / interface).is_dir():
+        return
+
+    available = sorted(entry.name for entry in root.iterdir() if entry.name.startswith("hci")) if root.is_dir() else []
+    raise RuntimeError(
+        f"Bluetooth adapter {interface!r} not found. "
+        f"Available: {', '.join(available) if available else 'none'}"
+    )
 
 
 def build_l2ping_command(
@@ -253,7 +297,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 def run_from_args(args: argparse.Namespace) -> int:
     if args.scan and not args.target:
-        devices = scan_devices()
+        devices = scan_devices(args.interface)
         if devices:
             print_devices(devices, json_output=args.json)
         else:
@@ -264,7 +308,7 @@ def run_from_args(args: argparse.Namespace) -> int:
         return 0
 
     if not args.target:
-        return run_interactive()
+        return run_interactive(args.interface)
 
     threads_count = validate_int_range("Threads count", args.threads, 1, MAX_THREADS)
     command = build_l2ping_command(
@@ -287,7 +331,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_interactive() -> int:
+def run_interactive(interface: str = DEFAULT_INTERFACE) -> int:
     print_logo()
     print()
     print("Use this tool only on Bluetooth devices you own or are explicitly authorized to test.")
@@ -298,7 +342,7 @@ def run_interactive() -> int:
         print("Aborted.")
         return 0
 
-    devices = scan_devices()
+    devices = scan_devices(interface)
     if not devices:
         print("No Bluetooth devices found. You can rerun with --target AA:BB:CC:DD:EE:FF.")
         return 1
@@ -310,7 +354,14 @@ def run_interactive() -> int:
     packet_count = prompt_int("Packet count", DEFAULT_PACKET_COUNT, 1, MAX_PACKET_COUNT)
     timeout = prompt_int("Timeout", DEFAULT_TIMEOUT, 1, MAX_TIMEOUT)
     delay = prompt_int("Delay", DEFAULT_DELAY, 0, MAX_DELAY)
-    command = build_l2ping_command(target, package_size, packet_count, timeout=timeout, delay=delay)
+    command = build_l2ping_command(
+        target,
+        package_size,
+        packet_count,
+        interface,
+        timeout=timeout,
+        delay=delay,
+    )
 
     phrase = input("Type 'authorized' to execute, or press Enter for dry-run > ").strip()
     if phrase != "authorized":

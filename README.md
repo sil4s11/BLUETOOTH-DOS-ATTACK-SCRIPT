@@ -10,6 +10,9 @@ This project is intended for devices you own or have written permission to test.
 - Live execution requires both `--execute` and `--confirm-authorized`.
 - `l2ping` runs are bounded with `--count`; flood mode is not used.
 - Bluetooth MAC addresses, adapter names, sizes, counts, timeouts, delays, and worker counts are validated.
+- Scanning is bounded by a fixed discovery window and a subprocess timeout.
+- `--interface` accepts only real BlueZ adapter names (`hciN`).
+- Failed subprocesses report the real stderr instead of only an exit status.
 - Shell command strings were replaced with argument lists passed to `subprocess.run`.
 - `--scan`, `--json`, `--timeout`, `--delay`, and `--version` were added.
 - Unit tests cover parsing, validation, command building, and dry-run output.
@@ -17,7 +20,8 @@ This project is intended for devices you own or have written permission to test.
 ## Requirements
 
 - Linux with BlueZ tools installed.
-- `hcitool` for scanning.
+- `bluetoothctl` (from BlueZ) for scanning. It uses D-Bus, so scanning works
+  without root. `hcitool` was removed in BlueZ 5.87 and is no longer used.
 - `l2ping` for L2CAP echo checks.
 - Python 3.9 or newer.
 
@@ -27,6 +31,10 @@ On Debian/Kali-style systems:
 sudo apt update
 sudo apt install python3 bluez
 ```
+
+Scanning needs the Bluetooth service running (`systemctl status bluetooth`);
+`bluetoothctl` reports `Controller ... not available` if the adapter is not
+registered with `bluetoothd`.
 
 ## Usage
 

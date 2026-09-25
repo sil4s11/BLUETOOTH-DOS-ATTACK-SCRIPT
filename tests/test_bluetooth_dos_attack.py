@@ -67,6 +67,23 @@ Scanning ...
         )
         self.assertNotIn("-f", command)
 
+    def test_validate_interface_rejects_flag_like_values(self):
+        # getopt consumes the next argv as the -i value even when it starts with
+        # "-", so these must never reach l2ping as a device name.
+        for value in ("-f", "-i", "-r", "--help", "..", "hci0 -f", "eth0", "hci", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(bt.ValidationError):
+                    bt.validate_interface(value)
+
+    def test_validate_interface_accepts_bluez_device_names(self):
+        for value in ("hci0", "hci1", "hci10", " hci2 "):
+            with self.subTest(value=value):
+                self.assertEqual(bt.validate_interface(value), value.strip())
+
+    def test_build_l2ping_command_rejects_flag_like_interface(self):
+        with self.assertRaises(bt.ValidationError):
+            bt.build_l2ping_command("AA:BB:CC:DD:EE:FF", 44, 1, interface="-f")
+
     def test_limits_reject_unbounded_values(self):
         with self.assertRaises(bt.ValidationError):
             bt.validate_int_range("Threads count", bt.MAX_THREADS + 1, 1, bt.MAX_THREADS)

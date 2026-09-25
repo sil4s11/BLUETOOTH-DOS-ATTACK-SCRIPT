@@ -34,7 +34,7 @@ MAX_DELAY = 10
 VERSION = "2.0.0"
 
 MAC_ADDRESS_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
-INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+INTERFACE_RE = re.compile(r"^hci[0-9]{1,3}$")
 
 
 class ValidationError(ValueError):
@@ -58,6 +58,8 @@ def normalize_mac(value: str) -> str:
 
 def validate_interface(value: str) -> str:
     interface = value.strip()
+    if not interface:
+        raise ValidationError("Bluetooth interface must not be empty.")
     if not INTERFACE_RE.fullmatch(interface):
         raise ValidationError(f"Invalid Bluetooth interface: {value!r}")
     return interface
@@ -331,6 +333,12 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nAborted.")
         raise SystemExit(130)
-    except (RuntimeError, ValidationError, subprocess.CalledProcessError) as exc:
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip()
+        print(f"Error: {' '.join(exc.cmd)} exited with status {exc.returncode}.", file=sys.stderr)
+        if detail:
+            print(f"Output: {detail}", file=sys.stderr)
+        raise SystemExit(1)
+    except (RuntimeError, ValidationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)

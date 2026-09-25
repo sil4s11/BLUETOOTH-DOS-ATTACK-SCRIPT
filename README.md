@@ -18,6 +18,8 @@ This project is intended for devices you own or have written permission to test.
 - Shell command strings were replaced with argument lists passed to `subprocess.run`.
 - Total packets per run are capped across all workers, not only per worker.
 - `--scan`, `--json`, `--timeout`, `--delay`, and `--version` were added.
+- `--recovery` measures post-load fatigue: baseline probe, bounded check, then
+  single-packet probes until RTT returns to baseline.
 - Unit tests cover parsing, validation, command building, packet budget, and
   dry-run output.
 
@@ -84,6 +86,36 @@ Add `--json` to get the same summary as machine-readable output.
 `CAP_NET_RAW`/`CAP_NET_ADMIN`. Scanning does not. A peer without an L2CAP
 echo channel is reported as unsupported rather than as packet loss, and a
 socket failure is reported as a failure rather than as a measurement.
+
+### Measuring fatigue and recovery
+
+`--recovery` measures how a device settles after the load phase. It takes a
+baseline probe first, runs the bounded check, then re-probes at a fixed
+interval and reports when RTT returns to baseline (within
+`RECOVERY_RTT_FACTOR`, 1.5x):
+
+```shell
+python3 Bluetooth-DOS-Attack.py --target AA:BB:CC:DD:EE:FF --count 4 --recovery --recovery-samples 5 --recovery-interval 2 --execute --confirm-authorized
+```
+
+```text
+[baseline] RTT: 3.9
+[result] No replies received.
+[recovery] post-load probes:
+  sample 1: no reply (degraded)
+  sample 2: 61.0 ms (degraded)
+  sample 3: 22.0 ms (degraded)
+  sample 4: 4.1 ms (ok)
+[recovery] target healthy again at sample 4.
+```
+
+Each post-load probe is a single bounded packet, so observing recovery does
+not add load. If a device does not return to a healthy RTT within the sample
+window, that is reported explicitly.
+
+Note: over the air, a busy 2.4 GHz band means a "no reply" may be interference
+rather than the device itself. `btmon` needs root and captures the raw HCI
+traffic if you need to attribute a failure.
 
 Interactive mode is still available:
 

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -32,6 +33,11 @@ MAX_PACKET_COUNT = 20
 MAX_TIMEOUT = 30
 MAX_DELAY = 10
 MAX_TOTAL_PACKETS = 64
+RECOVERY_RTT_FACTOR = 1.5
+DEFAULT_RECOVERY_SAMPLES = 5
+DEFAULT_RECOVERY_INTERVAL = 2
+MAX_RECOVERY_SAMPLES = 20
+MAX_RECOVERY_INTERVAL = 30
 
 VERSION = "2.0.0"
 
@@ -385,6 +391,73 @@ def merge_summaries(summaries: list[dict[str, object]]) -> dict[str, object]:
         )
     return merged
 
+
+def measure_recovery(
+    command: list[str],
+    threads_count: int,
+    baseline_rtt: float | None,
+    samples: int = 5,
+    interval: int = 2,
+) -> list[dict[str, object]]:
+    """Probe the target repeatedly and record whether it is still healthy.
+
+    Recovery is measured by re-probing at a fixed interval after a load phase
+    and watching RTT return to the pre-load baseline. Each probe is one bounded
+    packet, so this measures how the device settles rather than adding load.
+    """
+    require_tool("l2ping")
+    observations: list[dict[str, object]] = []
+
+    for index in range(samples):
+        time.sleep(interval)
+        summary = run_l2ping_workers(command, 1)
+        rtt = summary.get("rtt_ms_avg")
+        observations.append(
+            {
+                "sample": index + 1,
+                "rtt_ms_avg": rtt,
+                "received": summary["received"],
+                "healthy": is_healthy(rtt, baseline_rtt),
+            }
+        )
+
+    return observations
+
+
+def is_healthy(rtt: object, baseline_rtt: float | None) -> bool:
+    """A sample is healthy once replies arrive and RTT is near baseline.
+
+    Without a baseline the bar is simply that the device answers at all, which
+    still separates "recovered" from "stopped responding".
+    """
+    if rtt is None:
+        return False
+    if baseline_rtt is None:
+        return True
+    return float(rtt) <= baseline_rtt * RECOVERY_RTT_FACTOR
+
+
+def format_recovery(observations: list[dict[str, object]]) -> str:
+    if not observations:
+        return "No recovery samples were collected."
+
+    lines = ["[recovery] post-load probes:"]
+    for item in observations:
+        rtt = item["rtt_ms_avg"]
+        rtt_text = "no reply" if rtt is None else f"{rtt} ms"
+        marker = "ok" if item["healthy"] else "degraded"
+        lines.append(f"  sample {item['sample']}: {rtt_text} ({marker})")
+
+    recovered = next(
+        (item["sample"] for item in observations if item["healthy"]), None
+    )
+    if recovered is None:
+        lines.append("[recovery] target did not return to a healthy RTT.")
+    else:
+        lines.append(f"[recovery] target healthy again at sample {recovered}.")
+    return "\n".join(lines)
+
+
 def print_result(summary: dict[str, object], json_output: bool = False) -> None:
     if json_output:
         print(json.dumps(summary))
@@ -466,6 +539,26 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm that you own the target or have written permission to test it.",
     )
+    parser.add_argument(
+        "--recovery",
+        action="store_true",
+        help=(
+            "After the load phase, re-probe the target and report when its RTT "
+            "returns to baseline. Each probe is a single bounded packet."
+        ),
+    )
+    parser.add_argument(
+        "--recovery-samples",
+        type=int,
+        default=DEFAULT_RECOVERY_SAMPLES,
+        help=f"Post-load probes to take, 1-{MAX_RECOVERY_SAMPLES}.",
+    )
+    parser.add_argument(
+        "--recovery-interval",
+        type=int,
+        default=DEFAULT_RECOVERY_INTERVAL,
+        help=f"Seconds between post-load probes, 1-{MAX_RECOVERY_INTERVAL}.",
+    )
     return parser
 
 
@@ -503,8 +596,39 @@ def run_from_args(args: argparse.Namespace) -> int:
     if not args.confirm_authorized:
         raise ValidationError("Execution requires --confirm-authorized.")
 
+    require_tool("l2ping")
+
+    baseline = None
+    if args.recovery:
+        baseline = run_l2ping_workers(command, 1).get("rtt_ms_avg")
+        if not args.json:
+            print(f"[baseline] RTT: {baseline if baseline else 'no reply'}")
+
     summary = run_l2ping_workers(command, threads_count)
     print_result(summary, json_output=args.json)
+
+    if args.recovery:
+        observations = measure_recovery(
+            command,
+            threads_count,
+            baseline,
+            samples=validate_int_range(
+                "Recovery samples",
+                args.recovery_samples,
+                1,
+                MAX_RECOVERY_SAMPLES,
+            ),
+            interval=validate_int_range(
+                "Recovery interval",
+                args.recovery_interval,
+                1,
+                MAX_RECOVERY_INTERVAL,
+            ),
+        )
+        if args.json:
+            print(json.dumps({"recovery": observations}))
+        else:
+            print(format_recovery(observations))
     return 0
 
 

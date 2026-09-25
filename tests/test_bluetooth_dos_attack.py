@@ -311,6 +311,91 @@ class BluetoothL2capHelperTests(unittest.TestCase):
 
         self.assertEqual(stdout.getvalue(), "")
 
+    def test_health_requires_a_reply(self):
+        self.assertFalse(bt.is_healthy(None, 3.0))
+
+    def test_health_compares_against_baseline_factor(self):
+        factor = bt.RECOVERY_RTT_FACTOR
+        self.assertTrue(bt.is_healthy(3.0 * factor, 3.0))
+        self.assertTrue(bt.is_healthy(3.0 * factor - 0.01, 3.0))
+        self.assertFalse(bt.is_healthy(3.0 * factor + 0.01, 3.0))
+
+    def test_health_without_baseline_only_requires_a_reply(self):
+        self.assertTrue(bt.is_healthy(500.0, None))
+        self.assertFalse(bt.is_healthy(None, None))
+
+    def test_format_recovery_reports_first_healthy_sample(self):
+        observations = [
+            {"sample": 1, "rtt_ms_avg": None, "received": 0, "healthy": False},
+            {"sample": 2, "rtt_ms_avg": 40.0, "received": 1, "healthy": False},
+            {"sample": 3, "rtt_ms_avg": 4.1, "received": 1, "healthy": True},
+        ]
+
+        text = bt.format_recovery(observations)
+
+        self.assertIn("no reply", text)
+        self.assertIn("40.0 ms (degraded)", text)
+        self.assertIn("healthy again at sample 3", text)
+
+    def test_format_recovery_reports_target_that_never_recovers(self):
+        observations = [
+            {"sample": 1, "rtt_ms_avg": None, "received": 0, "healthy": False},
+            {"sample": 2, "rtt_ms_avg": 90.0, "received": 1, "healthy": False},
+        ]
+
+        self.assertIn("did not return", bt.format_recovery(observations))
+
+    def test_recovery_limits_are_validated(self):
+        args = bt.create_parser().parse_args(
+            [
+                "--target", "AA:BB:CC:DD:EE:FF",
+                "--recovery",
+                "--recovery-samples", str(bt.MAX_RECOVERY_SAMPLES + 1),
+            ]
+        )
+        with self.assertRaises(bt.ValidationError):
+            bt.validate_int_range(
+                "Recovery samples", args.recovery_samples, 1, bt.MAX_RECOVERY_SAMPLES
+            )
+
+    def test_recovery_probe_uses_a_single_packet(self):
+        # Probing must not re-add load: each post-load probe is one packet.
+        command = bt.build_l2ping_command("AA:BB:CC:DD:EE:FF", 44, 1, "hci0")
+
+        self.assertEqual(command[command.index("-c") + 1], "1")
+
+    def test_measure_recovery_probes_and_classifies_each_sample(self):
+        # Exercises measure_recovery end to end so the probe loop, the sleep,
+        # and the health classification all run. A stubbed l2ping keeps this off
+        # the radio.
+        original_which = bt.shutil.which
+        original_run = bt.run_l2ping_workers
+        self.addCleanup(setattr, bt.shutil, "which", original_which)
+        self.addCleanup(setattr, bt, "run_l2ping_workers", original_run)
+        bt.shutil.which = lambda name: "/usr/bin/l2ping"
+
+        replies = iter([3.0, None, 4.0])
+
+        def fake_run(command, threads):
+            rtt = next(replies)
+            return {"rtt_ms_avg": rtt, "received": 0 if rtt is None else 1}
+
+        bt.run_l2ping_workers = fake_run
+
+        observations = bt.measure_recovery(
+            ["l2ping", "-c", "1", "AA:BB:CC:DD:EE:FF"],
+            1,
+            3.0,
+            samples=3,
+            interval=1,
+        )
+
+        self.assertEqual([item["sample"] for item in observations], [1, 2, 3])
+        self.assertEqual(
+            [item["healthy"] for item in observations], [True, False, True]
+        )
+        self.assertEqual(observations[1]["rtt_ms_avg"], None)
+
 
 if __name__ == "__main__":
     unittest.main()

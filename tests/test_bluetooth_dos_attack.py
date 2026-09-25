@@ -153,6 +153,102 @@ class BluetoothL2capHelperTests(unittest.TestCase):
         self.assertEqual(payload["threads"], 1)
         self.assertEqual(payload["command"][0], "l2ping")
 
+    def test_parse_l2ping_output_reads_replies_and_summary(self):
+        output = (
+            "Ping: 88:F4:DA:99:89:AE from hci0 (data size 44) ...\n"
+            "44 bytes from 88:F4:DA:99:89:AE id 0 time 3.12ms\n"
+            "no response from 88:F4:DA:99:89:AE: id 1\n"
+            "44 bytes from 88:F4:DA:99:89:AE id 2 time 5.48ms\n"
+            "3 sent, 2 received, 33% loss\n"
+        )
+
+        summary = bt.parse_l2ping_output(output)
+
+        self.assertEqual(summary["sent"], 3)
+        self.assertEqual(summary["received"], 2)
+        self.assertEqual(summary["loss_percent"], 33)
+        self.assertEqual(summary["rtt_ms_min"], 3.12)
+        self.assertEqual(summary["rtt_ms_max"], 5.48)
+        self.assertEqual(summary["rtt_ms_avg"], 4.3)
+        self.assertFalse(summary["unsupported_echo"])
+
+    def test_parse_l2ping_output_flags_peer_without_echo_support(self):
+        summary = bt.parse_l2ping_output("Peer doesn't support Echo packets\n")
+
+        self.assertTrue(summary["unsupported_echo"])
+        self.assertIn("does not support", bt.format_summary(summary))
+
+    def test_parse_l2ping_output_reports_total_loss(self):
+        output = (
+            "no response from 88:F4:DA:99:89:AE: id 0\n"
+            "no response from 88:F4:DA:99:89:AE: id 1\n"
+            "2 sent, 0 received, 100% loss\n"
+        )
+
+        summary = bt.parse_l2ping_output(output)
+
+        self.assertEqual(summary["sent"], 2)
+        self.assertEqual(summary["received"], 0)
+        self.assertEqual(summary["loss_percent"], 100)
+        self.assertNotIn("rtt_ms_avg", summary)
+        self.assertEqual(bt.format_summary(summary), "No replies received.")
+
+    def test_parse_l2ping_output_distinguishes_socket_failure_from_loss(self):
+        # l2ping exits 0 even when it cannot open the HCI socket, so nothing was
+        # measured. That must not be reported as 100% packet loss.
+        summary = bt.parse_l2ping_output("Can't create socket: Operation not permitted\n")
+
+        self.assertTrue(summary["failed_to_start"])
+        self.assertEqual(summary["received"], 0)
+        self.assertIn("nothing was sent", bt.format_summary(summary))
+
+    def test_merge_summaries_keeps_loss_when_only_some_workers_failed(self):
+        merged = bt.merge_summaries(
+            [
+                bt.parse_l2ping_output("Can't create socket: Operation not permitted\n"),
+                bt.parse_l2ping_output(
+                    "44 bytes from AA:BB:CC:DD:EE:FF id 0 time 4.00ms\n"
+                    "1 sent, 1 received, 0% loss\n"
+                ),
+            ]
+        )
+
+        self.assertFalse(merged["failed_to_start"])
+        self.assertEqual(merged["received"], 1)
+
+    def test_merge_summaries_aggregates_workers(self):
+        workers = [
+            bt.parse_l2ping_output(
+                "44 bytes from AA:BB:CC:DD:EE:FF id 0 time 3.00ms\n"
+                "1 sent, 1 received, 0% loss\n"
+            ),
+            bt.parse_l2ping_output(
+                "44 bytes from AA:BB:CC:DD:EE:FF id 0 time 9.00ms\n"
+                "no response from AA:BB:CC:DD:EE:FF: id 1\n"
+                "2 sent, 1 received, 50% loss\n"
+            ),
+        ]
+
+        merged = bt.merge_summaries(workers)
+
+        self.assertEqual(merged["workers"], 2)
+        self.assertEqual(merged["sent"], 3)
+        self.assertEqual(merged["received"], 2)
+        self.assertEqual(merged["loss_percent"], 33)
+        self.assertEqual(merged["rtt_ms_min"], 3.0)
+        self.assertEqual(merged["rtt_ms_max"], 9.0)
+
+    def test_merge_summaries_propagates_unsupported_peer(self):
+        merged = bt.merge_summaries(
+            [
+                bt.parse_l2ping_output("44 bytes from AA:BB:CC:DD:EE:FF id 0 time 3.00ms\n"),
+                bt.parse_l2ping_output("Peer doesn't support Echo packets\n"),
+            ]
+        )
+
+        self.assertTrue(merged["unsupported_echo"])
+        self.assertIn("does not support", bt.format_summary(merged))
+
 
 if __name__ == "__main__":
     unittest.main()

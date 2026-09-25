@@ -83,6 +83,7 @@ BLUETOOTHCTL_DEVICE_RE = re.compile(r"^\[NEW\]\s+Device\s+([0-9A-Fa-f:]{17})(?:\
 BLUETOOTH_SYSFS = "/sys/class/bluetooth"
 DEFAULT_SCAN_SECONDS = 8
 DEFAULT_SCAN_TIMEOUT = 30
+WORKER_TIMEOUT = 300
 
 
 def parse_scan_output(output: str) -> list[tuple[str, str]]:
@@ -218,20 +219,161 @@ def prompt_int(prompt: str, default: int, minimum: int, maximum: int) -> int:
     return validate_int_range(prompt, value, minimum, maximum)
 
 
-def run_worker(command: list[str]) -> None:
-    subprocess.run(command, check=False)
+L2PING_REPLY_RE = re.compile(r"^(\d+) bytes from \S+ id (\d+) time ([\d.]+)ms")
+L2PING_SUMMARY_RE = re.compile(r"^(\d+) sent, (\d+) received, (\d+)% loss")
+L2PING_UNSUPPORTED_MARKER = "Peer doesn't support Echo packets"
+L2PING_FAILURE_MARKER = "Can't create socket"
 
 
-def run_l2ping_workers(command: list[str], threads_count: int) -> None:
+def parse_l2ping_output(output: str) -> dict[str, object]:
+    """Summarise l2ping stdout.
+
+    Line shapes come from the format strings in the l2ping binary:
+      "Ping: %s from %s (data size %d) ..."
+      "%d bytes from %s id %d time %.2fms"
+      "no response from %s: id %d"
+      "%d sent, %d received, %d%% loss"
+    A peer with no L2CAP echo channel reports "Peer doesn't support Echo
+    packets". "Can't create socket" means l2ping never sent anything, which
+    is a permissions failure rather than a measurement.
+    """
+    times: list[float] = []
+    sent = received = loss = None
+    unsupported = False
+    failed = False
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if L2PING_UNSUPPORTED_MARKER in line:
+            unsupported = True
+            continue
+        if L2PING_FAILURE_MARKER in line:
+            failed = True
+            continue
+
+        reply = L2PING_REPLY_RE.match(line)
+        if reply:
+            times.append(float(reply.group(3)))
+            continue
+
+        summary = L2PING_SUMMARY_RE.match(line)
+        if summary:
+            sent, received, loss = (int(summary.group(index)) for index in (1, 2, 3))
+
+    result: dict[str, object] = {
+        "sent": sent,
+        "received": len(times) if received is None else received,
+        "loss_percent": loss,
+        "unsupported_echo": unsupported,
+        "failed_to_start": failed,
+    }
+    if times:
+        result["rtt_ms_min"] = round(min(times), 2)
+        result["rtt_ms_avg"] = round(sum(times) / len(times), 2)
+        result["rtt_ms_max"] = round(max(times), 2)
+    return result
+
+
+def format_summary(summary: dict[str, object]) -> str:
+    if summary["failed_to_start"]:
+        return (
+            "l2ping could not open the Bluetooth socket; nothing was sent. "
+            "Run as root or grant CAP_NET_RAW/CAP_NET_ADMIN."
+        )
+    if summary["unsupported_echo"]:
+        return "Peer does not support L2CAP echo packets; no diagnostics possible."
+
+    if not summary.get("rtt_ms_avg"):
+        return "No replies received."
+
+    return (
+        f"Replies: {summary['received']}/{summary['sent']} "
+        f"({summary['loss_percent']}% loss) | "
+        f"RTT min {summary['rtt_ms_min']} ms, "
+        f"avg {summary['rtt_ms_avg']} ms, "
+        f"max {summary['rtt_ms_max']} ms"
+    )
+
+
+def run_worker(command: list[str], results: list[str], lock: threading.Lock) -> None:
+    """Run one l2ping worker and collect its output.
+
+    l2ping exits 0 even when every packet is lost, so the return code is not a
+    usable signal; the output has to be parsed instead.
+    """
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=WORKER_TIMEOUT,
+    )
+    output = f"{completed.stdout}{completed.stderr}"
+    with lock:
+        results.append(output)
+
+
+def run_l2ping_workers(command: list[str], threads_count: int) -> dict[str, object]:
+    """Run bounded l2ping workers and return an aggregated summary."""
     require_tool("l2ping")
-    threads = []
-    for _ in range(threads_count):
-        thread = threading.Thread(target=run_worker, args=(command,))
-        thread.start()
-        threads.append(thread)
+    results: list[str] = []
+    lock = threading.Lock()
 
+    threads = [
+        threading.Thread(target=run_worker, args=(command, results, lock))
+        for _ in range(threads_count)
+    ]
+    for thread in threads:
+        thread.start()
     for thread in threads:
         thread.join()
+
+    return merge_summaries([parse_l2ping_output(output) for output in results])
+
+
+def merge_summaries(summaries: list[dict[str, object]]) -> dict[str, object]:
+    """Combine per-worker summaries into one."""
+    merged: dict[str, object] = {
+        "sent": 0,
+        "received": 0,
+        "loss_percent": None,
+        "unsupported_echo": any(item["unsupported_echo"] for item in summaries),
+        "failed_to_start": bool(summaries) and all(item["failed_to_start"] for item in summaries),
+        "workers": len(summaries),
+    }
+
+    rtt_values: list[float] = []
+    averages: list[float] = []
+    for item in summaries:
+        if item["sent"] is not None:
+            merged["sent"] = int(merged["sent"]) + int(item["sent"])
+        merged["received"] = int(merged["received"]) + int(item["received"])
+        for key in ("rtt_ms_min", "rtt_ms_max"):
+            if key in item:
+                rtt_values.append(float(item[key]))
+        if "rtt_ms_avg" in item:
+            averages.append(float(item["rtt_ms_avg"]))
+
+    if rtt_values:
+        merged["rtt_ms_min"] = round(min(rtt_values), 2)
+        merged["rtt_ms_max"] = round(max(rtt_values), 2)
+        merged["rtt_ms_avg"] = round(sum(averages) / len(averages), 2)
+
+    sent = int(merged["sent"])
+    if sent:
+        merged["loss_percent"] = round(
+            100 * (sent - int(merged["received"])) / sent
+        )
+    return merged
+
+def print_result(summary: dict[str, object], json_output: bool = False) -> None:
+    if json_output:
+        print(json.dumps(summary))
+        return
+    print("[result]", format_summary(summary))
+
 
 
 def print_dry_run(command: list[str], threads_count: int, json_output: bool = False) -> None:
@@ -327,7 +469,8 @@ def run_from_args(args: argparse.Namespace) -> int:
     if not args.confirm_authorized:
         raise ValidationError("Execution requires --confirm-authorized.")
 
-    run_l2ping_workers(command, threads_count)
+    summary = run_l2ping_workers(command, threads_count)
+    print_result(summary, json_output=args.json)
     return 0
 
 
@@ -368,7 +511,8 @@ def run_interactive(interface: str = DEFAULT_INTERFACE) -> int:
         print_dry_run(command, threads_count)
         return 0
 
-    run_l2ping_workers(command, threads_count)
+    summary = run_l2ping_workers(command, threads_count)
+    print_result(summary)
     return 0
 
 

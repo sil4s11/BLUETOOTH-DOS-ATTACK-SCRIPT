@@ -13,6 +13,8 @@ This project is intended for devices you own or have written permission to test.
 - Scanning is bounded by a fixed discovery window and a subprocess timeout.
 - `--interface` accepts only real BlueZ adapter names (`hciN`).
 - Failed subprocesses report the real stderr instead of only an exit status.
+- `l2ping` output is parsed and summarised: replies, packet loss, and RTT
+  min/avg/max, with `--json` for machine-readable results.
 - Shell command strings were replaced with argument lists passed to `subprocess.run`.
 - `--scan`, `--json`, `--timeout`, `--delay`, and `--version` were added.
 - Unit tests cover parsing, validation, command building, and dry-run output.
@@ -67,6 +69,19 @@ Run a bounded diagnostic check only when authorized:
 ```shell
 python3 Bluetooth-DOS-Attack.py --target AA:BB:CC:DD:EE:FF --package-size 64 --count 4 --timeout 5 --delay 1 --execute --confirm-authorized
 ```
+
+Results are summarised instead of being printed raw:
+
+```text
+[result] Replies: 2/3 (33% loss) | RTT min 3.12 ms, avg 4.3 ms, max 5.48 ms
+```
+
+Add `--json` to get the same summary as machine-readable output.
+
+`l2ping` needs a raw HCI socket, so running a check needs root or
+`CAP_NET_RAW`/`CAP_NET_ADMIN`. Scanning does not. A peer without an L2CAP
+echo channel is reported as unsupported rather than as packet loss, and a
+socket failure is reported as a failure rather than as a measurement.
 
 Interactive mode is still available:
 

@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -395,6 +396,83 @@ class BluetoothL2capHelperTests(unittest.TestCase):
             [item["healthy"] for item in observations], [True, False, True]
         )
         self.assertEqual(observations[1]["rtt_ms_avg"], None)
+
+    def test_lookup_vendor_matches_oui_prefix(self):
+        vendors = {"8CC8CD": "Samsung Electronics Co.,Ltd"}
+
+        self.assertEqual(
+            bt.lookup_vendor("8C:C8:CD:BD:B3:6C", vendors),
+            "Samsung Electronics Co.,Ltd",
+        )
+
+    def test_lookup_vendor_marks_randomised_addresses(self):
+        vendors = {"8CC8CD": "Samsung Electronics Co.,Ltd"}
+
+        self.assertEqual(
+            bt.lookup_vendor("75:D9:D1:A6:EB:1A", vendors),
+            "randomized / unknown",
+        )
+
+    def test_lookup_vendor_handles_empty_registry(self):
+        self.assertEqual(
+            bt.lookup_vendor("8C:C8:CD:BD:B3:6C", {}),
+            "randomized / unknown",
+        )
+
+    def test_load_oui_database_parses_registry_format(self):
+        # The IEEE CSV header is: Registry,Assignment,Organization Name,...
+        original_cache = bt.Oui_CACHE_FILE
+        original_fresh = bt._cache_is_fresh
+        self.addCleanup(setattr, bt, "Oui_CACHE_FILE", original_cache)
+        self.addCleanup(setattr, bt, "_cache_is_fresh", original_fresh)
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "oui.csv"
+            cache.write_text(
+                'Registry,Assignment,Organization Name,Organization Address\n'
+                'MA-L,8CC8CD,"Samsung Electronics Co.,Ltd","Korea"\n'
+                'MA-L,F024F9,"Espressif Inc.","China"\n'
+            )
+            bt.Oui_CACHE_FILE = cache
+            bt._cache_is_fresh = lambda: True
+
+            vendors = bt.load_oui_database()
+
+        self.assertEqual(vendors["8CC8CD"], "Samsung Electronics Co.,Ltd")
+        self.assertEqual(vendors["F024F9"], "Espressif Inc.")
+
+    def test_print_devices_includes_vendor_when_requested(self):
+        vendors = {"8CC8CD": "Samsung Electronics"}
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            bt.print_devices(
+                [("8C:C8:CD:BD:B3:6C", "Speaker"), ("75:D9:D1:A6:EB:1A", "Unknown")],
+                vendors=vendors,
+            )
+
+        text = stdout.getvalue()
+        self.assertIn("vendor", text)
+        self.assertIn("Samsung Electronics", text)
+        self.assertIn("randomized / unknown", text)
+
+    def test_print_devices_json_carries_vendor_key(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            bt.print_devices(
+                [("8C:C8:CD:BD:B3:6C", "Speaker")],
+                json_output=True,
+                vendors={"8CC8CD": "Samsung Electronics"},
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload[0]["vendor"], "Samsung Electronics")
+
+    def test_print_devices_without_vendors_omits_column(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            bt.print_devices([("8C:C8:CD:BD:B3:6C", "Speaker")])
+
+        self.assertNotIn("vendor", stdout.getvalue())
 
 
 if __name__ == "__main__":

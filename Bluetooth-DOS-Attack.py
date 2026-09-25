@@ -9,6 +9,7 @@ diagnostic pings after explicit authorization.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import shutil
@@ -18,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Iterable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 DEFAULT_INTERFACE = "hci0"
@@ -107,6 +110,71 @@ BLUETOOTH_SYSFS = "/sys/class/bluetooth"
 DEFAULT_SCAN_SECONDS = 8
 DEFAULT_SCAN_TIMEOUT = 30
 WORKER_TIMEOUT = 300
+
+OUi_URL = "https://standards-oui.ieee.org/oui/oui.csv"
+Oui_CACHE_DIR = Path.home() / ".cache" / "bluetooth-l2cap-helper"
+Oui_CACHE_FILE = Oui_CACHE_DIR / "oui.csv"
+Oui_CACHE_MAX_AGE_DAYS = 30
+
+
+def load_oui_database() -> dict[str, str]:
+    """Load the IEEE OUI registry, downloading it once and caching it.
+
+    The first three bytes of a MAC are the Organizationally Unique Identifier.
+    Looking one up is a local table read; no radio traffic is involved. Devices
+    using a randomised address are absent from the registry by design and will
+    never resolve.
+    """
+    if not _cache_is_fresh():
+        _download_oui_database()
+
+    vendors: dict[str, str] = {}
+    with Oui_CACHE_FILE.open(newline="", encoding="utf-8", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            assignment = (row.get("Assignment") or "").strip().upper()
+            organization = (row.get("Organization Name") or "").strip()
+            if len(assignment) == 6 and organization:
+                vendors[assignment] = organization
+    return vendors
+
+
+def lookup_vendor(mac: str, vendors: dict[str, str]) -> str:
+    """Return the vendor for a MAC, or a marker when the address is randomised."""
+    prefix = normalize_mac(mac)[:8].replace(":", "")
+    return vendors.get(prefix, "randomized / unknown")
+
+
+def _cache_is_fresh() -> bool:
+    if not Oui_CACHE_FILE.is_file():
+        return False
+    age_days = (time.time() - Oui_CACHE_FILE.stat().st_mtime) / 86400
+    return age_days <= Oui_CACHE_MAX_AGE_DAYS
+
+
+def _download_oui_database() -> None:
+    Oui_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # The IEEE registry rejects the default urllib agent with HTTP 418.
+    request = Request(OUi_URL, headers={"User-Agent": f"bluetooth-l2cap-helper/{VERSION}"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = response.read()
+    except (URLError, HTTPError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"Could not download the OUI registry: {exc}. "
+            f"Fetch {OUi_URL} manually to {Oui_CACHE_FILE}."
+        ) from exc
+    Oui_CACHE_FILE.write_bytes(payload)
+
+
+def require_oui_cache() -> None:
+    if not Oui_CACHE_FILE.is_file():
+        raise RuntimeError(
+            f"No OUI cache at {Oui_CACHE_FILE}. Fetch {OUi_URL} manually, "
+            f"or run without --vendor."
+        )
+
+
 
 
 def parse_scan_output(output: str) -> list[tuple[str, str]]:
@@ -207,16 +275,38 @@ def build_l2ping_command(
     ]
 
 
-def print_devices(devices: Iterable[tuple[str, str]], json_output: bool = False) -> None:
+def print_devices(
+    devices: Iterable[tuple[str, str]],
+    json_output: bool = False,
+    vendors: dict[str, str] | None = None,
+) -> None:
     device_list = list(devices)
+
     if json_output:
-        print(json.dumps([{"id": index, "mac": mac, "name": name} for index, (mac, name) in enumerate(device_list)]))
+        payload = [
+            {
+                "id": index,
+                "mac": mac,
+                "name": name,
+                "vendor": lookup_vendor(mac, vendors) if vendors else None,
+            }
+            for index, (mac, name) in enumerate(device_list)
+        ]
+        print(json.dumps(payload))
         return
 
-    print("| id | mac address       | device name |")
-    print("|----|-------------------|-------------|")
+    if vendors is None:
+        print("| id | mac address       | device name |")
+        print("|----|-------------------|-------------|")
+        for index, (mac, name) in enumerate(device_list):
+            print(f"| {index:<2} | {mac:<17} | {name} |")
+        return
+
+    print("| id | mac address       | vendor                  | device name |")
+    print("|----|-------------------|-------------------------|-------------|")
     for index, (mac, name) in enumerate(device_list):
-        print(f"| {index:<2} | {mac:<17} | {name} |")
+        vendor = lookup_vendor(mac, vendors)[:23]
+        print(f"| {index:<2} | {mac:<17} | {vendor:<23} | {name} |")
 
 
 def resolve_target(value: str, devices: list[tuple[str, str]]) -> str:
@@ -500,6 +590,15 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--scan", action="store_true", help="Scan nearby Bluetooth devices and exit.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON for scan and dry-run output.")
+    parser.add_argument(
+        "--vendor",
+        action="store_true",
+        help=(
+            "Show the vendor behind each device, resolved from the IEEE OUI "
+            "registry (first three MAC bytes). Randomised addresses, which most "
+            "modern BLE devices use, will not resolve."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--target", help="Bluetooth MAC address to check.")
     parser.add_argument("--interface", default=DEFAULT_INTERFACE, help="Bluetooth interface to use.")
@@ -566,7 +665,7 @@ def run_from_args(args: argparse.Namespace) -> int:
     if args.scan and not args.target:
         devices = scan_devices(args.interface)
         if devices:
-            print_devices(devices, json_output=args.json)
+            print_devices(devices, json_output=args.json, vendors=load_oui_database() if args.vendor else None)
         else:
             if args.json:
                 print("[]")

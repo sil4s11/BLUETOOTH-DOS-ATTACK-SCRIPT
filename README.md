@@ -20,8 +20,10 @@ This project is intended for devices you own or have written permission to test.
 - `--scan`, `--json`, `--timeout`, `--delay`, and `--version` were added.
 - `--recovery` measures post-load fatigue: baseline probe, bounded check, then
   single-packet probes until RTT returns to baseline.
-- Unit tests cover parsing, validation, command building, packet budget, and
-  dry-run output.
+- `--vendor` resolves each device's vendor from the IEEE OUI registry, cached
+  locally after the first download.
+- Unit tests cover parsing, validation, command building, packet budget, vendor
+  lookup, recovery, and dry-run output.
 
 ## Requirements
 
@@ -57,6 +59,31 @@ python3 Bluetooth-DOS-Attack.py --scan
 ```
 
 Scan with JSON output:
+
+Scan and resolve each device's vendor from its IEEE OUI:
+
+```shell
+python3 Bluetooth-DOS-Attack.py --scan --vendor
+```
+
+```text
+| id | mac address       | vendor                  | device name |
+|----|-------------------|-------------------------|-------------|
+| 0  | 50:8A:06:52:AC:33 | Tuya Smart Inc.         | TY          |
+| 1  | 75:D9:D1:A6:EB:1A | randomized / unknown    | 75-D9-D1-A6-EB-1A |
+```
+
+The first three bytes of a Bluetooth address are an Organizationally Unique
+Identifier assigned to a company in the public IEEE registry. The registry is
+downloaded once and cached in `~/.cache/bluetooth-l2cap-helper/oui.csv`;
+afterwards the lookup is a local read and no network access is needed.
+
+About half of visible devices will not resolve. Modern BLE devices use a
+randomised address for privacy, and a randomised address has no vendor by
+design. This is not a limitation of the lookup and no scanner can recover it.
+
+Device class and service UUIDs are **not** available this way: `bluetoothctl
+info` only reports them for paired or connected devices.
 
 ```shell
 python3 Bluetooth-DOS-Attack.py --scan --json
